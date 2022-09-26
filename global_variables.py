@@ -1,0 +1,2 @@
+GOOGLE_SHEET_ID = "1QpKntvEaSvjKFAWYoKoWV-DuMbcq3NEy-apWm4yNzkU"
+SAMPLE_RANGE_NAME = "DjMetaData!A1:O"
