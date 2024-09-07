@@ -34,6 +34,7 @@ Base = declarative_base()
 # Pydantic Model
 class Track(BaseModel):
     title: str
+    url: str
     label: Optional[str] = None
     version: Optional[str] = None
     released: Optional[str] = None  # Use date string format
@@ -45,12 +46,16 @@ class Track(BaseModel):
     tags: Optional[List[str]] = None
     artists: Optional[List[int]] = None
     
+class TrackResp(Track):
+    id: str
+
 # SQLAlchemy Model
 class TrackDB(Base):
     __tablename__ = "tracks"
 
     id = Column(Integer, primary_key=True, index=True)
     title = Column(String, index=True)
+    url = Column(String)
     version = Column(String, index=True, nullable=True)
     label = Column(String, index=True, nullable=True)
     released = Column(String, nullable=True)
@@ -60,7 +65,6 @@ class TrackDB(Base):
     bpm = Column(Float, nullable=True)
     comment = Column(String, nullable=True)
     tags = Column(ARRAY(String), nullable=True)
-
     artists = Column(ARRAY(Integer), nullable=True)
 
 class Artist(BaseModel):
@@ -68,11 +72,8 @@ class Artist(BaseModel):
     url: str
     platform_id: Optional[int] = None
 
-class ArtistResp(BaseModel):
+class ArtistResp(Artist):
     id: int
-    name: str
-    url: str
-    platform_id: int
 
 class ArtistDB(Base):
     __tablename__ = "artists"
@@ -95,9 +96,8 @@ class Url(BaseModel):
 class Platform(BaseModel):
     name: str
 
-class PlatformResp(BaseModel):
+class PlatformResp(Platform):
     id: int
-    name: str
 
 class PlatformDB(Base):
     __tablename__ = "platform"
@@ -129,6 +129,67 @@ async def add_track(track: Track, session: AsyncSession = Depends(get_session)):
         session.add(new_track)
     await session.commit()
     return {"message": "Track added successfully"}
+
+@app.get("/getTrackData", response_model=TrackResp)
+async def get_track_data(track: Track, session: AsyncSession = Depends(get_session)) -> TrackResp:
+    async with session.begin():
+        # Build a dynamic query using the track attributes provided in the request
+        query = select(TrackDB)
+
+        # Add filters for each non-null attribute in the Track model
+        if track.title:
+            query = query.filter(TrackDB.title == track.title)
+        if track.label:
+            query = query.filter(TrackDB.label == track.label)
+        if track.version:
+            query = query.filter(TrackDB.version == track.version)
+        if track.released:
+            query = query.filter(TrackDB.released == track.released)
+        if track.length:
+            query = query.filter(TrackDB.length == track.length)
+        if track.genre:
+            query = query.filter(TrackDB.genre == track.genre)
+        if track.key:
+            query = query.filter(TrackDB.key == track.key)
+        if track.bpm:
+            query = query.filter(TrackDB.bpm == track.bpm)
+        if track.comment:
+            query = query.filter(TrackDB.comment == track.comment)
+
+        # Execute the query
+        result = await session.execute(query)
+        track_data = result.scalars().first()
+
+        # Check if track exists
+        if not track_data:
+            raise HTTPException(status_code=404, detail="Track not found")
+
+        # Fetch associated artists (if any)
+        artist_ids = track_data.artists  # Assuming this is a list of artist IDs
+        if artist_ids:
+            artist_result = await session.execute(
+                select(ArtistDB).filter(ArtistDB.id.in_(artist_ids))
+            )
+            artists = artist_result.scalars().all()
+            artist_data = [{"id": artist.id, "name": artist.name, "url": artist.url} for artist in artists]
+        else:
+            artist_data = []
+
+        # Return the track details in the response model
+        return TrackResp(
+            id=track_data.id,
+            title=track_data.title,
+            label=track_data.label,
+            version=track_data.version,
+            released=track_data.released,
+            length=track_data.length,
+            genre=track_data.genre,
+            key=track_data.key,
+            bpm=track_data.bpm,
+            comment=track_data.comment,
+            tags=track_data.tags,
+            artists=artist_data
+        )
 
 def get_platform_name(url:str) -> str:
     if "beatport" in url:
