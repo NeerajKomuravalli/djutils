@@ -47,7 +47,14 @@ class Track(BaseModel):
     artists: Optional[List[int]] = None
     
 class TrackResp(Track):
-    id: str
+    id: int
+
+    model_config = {
+        'from_attributes': True
+    }
+
+class TrackRespList(BaseModel):
+    data: List[TrackResp] = []
 
 # SQLAlchemy Model
 class TrackDB(Base):
@@ -75,6 +82,10 @@ class Artist(BaseModel):
 class ArtistResp(Artist):
     id: int
 
+    model_config = {
+        'from_attributes': True
+    }
+
 class ArtistDB(Base):
     __tablename__ = "artists"
 
@@ -93,11 +104,18 @@ class ArtistDB(Base):
 class Url(BaseModel):
     url: str
 
+class Id(BaseModel):
+    id: int
+
 class Platform(BaseModel):
     name: str
 
 class PlatformResp(Platform):
     id: int
+
+    model_config = {
+        'from_attributes': True
+    }
 
 class PlatformDB(Base):
     __tablename__ = "platform"
@@ -120,76 +138,71 @@ async def get_session() -> AsyncGenerator[AsyncSession, None]:
     async with SessionLocal() as session:
         yield session
 
+async def _add_track(track:Track, session: AsyncSession) -> TrackResp:
+    new_track = TrackDB(**track.model_dump())
+    session.add(new_track)
+    await session.flush()
+    new_track_resp = TrackResp.model_validate(new_track)
+    await session.commit()
+
+    return new_track_resp
+
 # PUT endpoint
 @app.put("/addTrack")
 async def add_track(track: Track, session: AsyncSession = Depends(get_session)):
     async with session.begin():
-        # Use model_dump() instead of dict()
-        new_track = TrackDB(**track.model_dump())
-        session.add(new_track)
-    await session.commit()
-    return {"message": "Track added successfully"}
+        try:
+            track_data_list = await _get_tracks(track.url, session)
+            if len(track_data_list.data) > 1:
+                raise Exception("More than one tracks found!")
+            elif len(track_data_list.data) == 1:
+                track_data = track_data_list.data[0]
 
-@app.get("/getTrackData", response_model=TrackResp)
-async def get_track_data(track: Track, session: AsyncSession = Depends(get_session)) -> TrackResp:
+        except HTTPException as e:
+            if e.status_code == 404:
+                track_data = await _add_track(track, session)
+            else:
+                raise Exception(e)
+        except Exception as e:
+            raise Exception(e)
+        
+        return track_data
+
+async def _get_tracks(url:str, session: AsyncSession) -> TrackRespList:
+    # Build a dynamic query using the track attributes provided in the request
+    query = select(TrackDB)
+
+    # Add filters for each non-null attribute in the Track model
+    if url:
+        query = query.filter(TrackDB.url == url)
+
+    # Execute the query
+    result = await session.execute(query)
+    track_data = result.scalars().all()
+
+    # Check if track exists
+    if not track_data:
+        raise HTTPException(status_code=404, detail="Track not found")
+
+    tracks_resp = TrackRespList(
+        data = []
+    )
+
+    for track in track_data:
+        tracks_resp.data.append(TrackResp.model_validate(track))
+
+    return tracks_resp
+
+@app.get("/getTrack", response_model=TrackResp)
+async def get_track(url: str, session: AsyncSession = Depends(get_session)) -> TrackResp:
     async with session.begin():
-        # Build a dynamic query using the track attributes provided in the request
-        query = select(TrackDB)
-
-        # Add filters for each non-null attribute in the Track model
-        if track.title:
-            query = query.filter(TrackDB.title == track.title)
-        if track.label:
-            query = query.filter(TrackDB.label == track.label)
-        if track.version:
-            query = query.filter(TrackDB.version == track.version)
-        if track.released:
-            query = query.filter(TrackDB.released == track.released)
-        if track.length:
-            query = query.filter(TrackDB.length == track.length)
-        if track.genre:
-            query = query.filter(TrackDB.genre == track.genre)
-        if track.key:
-            query = query.filter(TrackDB.key == track.key)
-        if track.bpm:
-            query = query.filter(TrackDB.bpm == track.bpm)
-        if track.comment:
-            query = query.filter(TrackDB.comment == track.comment)
-
-        # Execute the query
-        result = await session.execute(query)
-        track_data = result.scalars().first()
-
-        # Check if track exists
-        if not track_data:
-            raise HTTPException(status_code=404, detail="Track not found")
-
-        # Fetch associated artists (if any)
-        artist_ids = track_data.artists  # Assuming this is a list of artist IDs
-        if artist_ids:
-            artist_result = await session.execute(
-                select(ArtistDB).filter(ArtistDB.id.in_(artist_ids))
-            )
-            artists = artist_result.scalars().all()
-            artist_data = [{"id": artist.id, "name": artist.name, "url": artist.url} for artist in artists]
+        track_data_list = await _get_tracks(url, session)
+        if len(track_data_list.data) > 1:
+            raise Exception("More than one tracks found!")
+        elif len(track_data_list.data) == 1:
+            return track_data_list.data[0]
         else:
-            artist_data = []
-
-        # Return the track details in the response model
-        return TrackResp(
-            id=track_data.id,
-            title=track_data.title,
-            label=track_data.label,
-            version=track_data.version,
-            released=track_data.released,
-            length=track_data.length,
-            genre=track_data.genre,
-            key=track_data.key,
-            bpm=track_data.bpm,
-            comment=track_data.comment,
-            tags=track_data.tags,
-            artists=artist_data
-        )
+            return None
 
 def get_platform_name(url:str) -> str:
     if "beatport" in url:
@@ -205,8 +218,7 @@ def get_platform_name(url:str) -> str:
 
 @app.put("/addArtist")
 async def add_artist(artist: Artist, session: AsyncSession = Depends(get_session)) -> ArtistResp:
-        
-    
+
     async with session.begin():
         # Check if the artist already exists with the same name and platform_id
         result = await session.execute(
@@ -225,15 +237,28 @@ async def add_artist(artist: Artist, session: AsyncSession = Depends(get_session
         new_artist = ArtistDB(**artist.model_dump())
         session.add(new_artist)
         await session.flush()
-        artists_resp = ArtistResp(
-            id=new_artist.id,
-            name=new_artist.name,
-            url=new_artist.url,
-            platform_id=new_artist.platform_id
-        )
+        artists_resp = ArtistResp.model_validate(new_artist)
         await session.commit()
         # Return the newly added artist's ID
         return artists_resp
+
+@app.get("/getArtist")
+async def get_artist(id: int, session: AsyncSession = Depends(get_session)) -> ArtistResp:
+    async with session.begin():
+        # Build a dynamic query using the track attributes provided in the request
+        query = select(ArtistDB)
+
+        query = query.filter(ArtistDB.id == id)
+
+        # Execute the query
+        result = await session.execute(query)
+        artist_data = result.scalars().first()
+
+        # Check if track exists
+        if not artist_data:
+            raise HTTPException(status_code=404, detail="Artist not found")
+
+        return ArtistResp.model_validate(artist_data)
 
 @app.put("/addPlatform")
 async def add_platform(url: Url, session: AsyncSession = Depends(get_session)) -> PlatformResp:
@@ -260,10 +285,7 @@ async def add_platform(url: Url, session: AsyncSession = Depends(get_session)) -
         new_platform = PlatformDB(**platform.model_dump())
         session.add(new_platform)
         await session.flush()
-        platform_resp = PlatformResp(
-            id=new_platform.id,
-            name=new_platform.name
-        )
+        platform_resp = PlatformResp.model_validate(new_platform)
         await session.commit()
         
         return platform_resp
