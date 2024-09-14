@@ -2,12 +2,12 @@ from typing import List, Optional
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from sqlalchemy import Column, Integer, String, ForeignKey
-from sqlalchemy import Column, Integer, String, Float, Date, ARRAY
+from sqlalchemy import Column, Integer, String, ForeignKey, update, Float, ARRAY
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from sqlalchemy.future import select
+from sqlalchemy import update
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
@@ -149,7 +149,7 @@ async def _add_track(track:Track, session: AsyncSession) -> TrackResp:
 
 # PUT endpoint
 @app.put("/addTrack")
-async def add_track(track: Track, session: AsyncSession = Depends(get_session)):
+async def add_track(track: Track, session: AsyncSession = Depends(get_session)) -> TrackResp:
     async with session.begin():
         try:
             track_data_list = await _get_tracks(track.url, session)
@@ -157,6 +157,29 @@ async def add_track(track: Track, session: AsyncSession = Depends(get_session)):
                 raise Exception("More than one tracks found!")
             elif len(track_data_list.data) == 1:
                 track_data = track_data_list.data[0]
+                # Update the track data in postgres with the latest track data
+                await session.execute(
+                    update(TrackDB)
+                    .where(TrackDB.id == track_data.id)
+                    .values(
+                        title=track.title,
+                        artists=track.artists,
+                        url=track.url,
+                        version=track.version,
+                        label=track.label,
+                        released=track.released,
+                        length=track.length,
+                        genre=track.genre,
+                        key=track.key,
+                        bpm=track.bpm,
+                        comment=track.comment,
+                        tags=track.tags
+                    )
+                )
+                await session.commit()
+            else:
+                # If no track data found, add the new track
+                track_data = await _add_track(track, session)
 
         except HTTPException as e:
             if e.status_code == 404:
