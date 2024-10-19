@@ -1,7 +1,8 @@
+import json
 from typing import List, Optional
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, validator, field_validator
 from sqlalchemy import Column, Integer, String, ForeignKey, update, Float, ARRAY
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.ext.declarative import declarative_base
@@ -10,6 +11,7 @@ from sqlalchemy.future import select
 from sqlalchemy import update
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
+from rapidfuzz import fuzz
 
 PASSWORD = "SCRAM-SHA-256$4096:JZavfYFOt+UfXDmFS04Kyg==$XN/agqg8VV1Se4+8qbfMiDUvK5bKHFRzkhNcZ487Y90=:znDjm5z80+wrIlHJ4BLmVl0oGb+hDHeWa3g8ZBKelTw="
 DATABASE_URL = f"postgresql+asyncpg://djutils_api:{PASSWORD}@localhost/djutils"
@@ -45,9 +47,26 @@ class Track(BaseModel):
     comment: Optional[str] = None
     tags: Optional[List[str]] = None
     artists: Optional[List[int]] = None
+
+    @field_validator('bpm', mode="before")
+    def convert_bpm(cls, value):
+        if isinstance(value, str):  # Check if the value is a string
+            try:
+                return int(value)  # Convert the string to an integer
+            except ValueError:
+                raise ValueError("bpm must be a valid integer")
+        return value  # If it's already an integer, return it unchanged
+
     
 class TrackResp(Track):
     id: int
+
+    model_config = {
+        'from_attributes': True
+    }
+
+class SimilarTrackResp(Track):
+    score: float
 
     model_config = {
         'from_attributes': True
@@ -78,6 +97,16 @@ class Artist(BaseModel):
     name: str
     url: str
     platform_id: Optional[int] = None
+
+    @field_validator('platform_id', mode="before")
+    def convert_bpm(cls, value):
+        if isinstance(value, str):  # Check if the value is a string
+            try:
+                return int(value)  # Convert the string to an integer
+            except ValueError:
+                raise ValueError("platform_id must be a valid integer")
+        return value  # If it's already an integer, return it unchanged
+    
 
 class ArtistResp(Artist):
     id: int
@@ -146,6 +175,94 @@ async def _add_track(track:Track, session: AsyncSession) -> TrackResp:
     await session.commit()
 
     return new_track_resp
+
+def match_artists(artist_name: str, artist_db_names: List[str]) -> float:
+    """
+    Match the artist name with the artist names in the database and return the best score.
+    """
+    max_score = 0
+    for db_name in artist_db_names:
+        # Use fuzzy matching to compare the artist's name
+        score = fuzz.partial_ratio(artist_name.lower(), db_name.lower())
+        max_score = max(max_score, score)
+    return max_score
+
+@app.get("/similarTracks", response_model=List[SimilarTrackResp])
+async def get_similar_tracks(track: str, artists:str, session: AsyncSession = Depends(get_session)):
+# async def get_similar_tracks(track: Track, artists: List[Artist], session: AsyncSession = Depends(get_session)):
+    # Filter TrackDb for similar name as track.title
+    # If no tracks are found then no similar tracks exist. Return
+    # If tarcks exists then iterate over them and:
+    # Find fuzzy match score for titles
+    # Find artist name match score by:
+        # split the artists name into words and then do a fuzzy match 
+        # logic to only take theb score with max score and then average it
+    # If both title and artists name score matches then do a comparison 
+    # of each parameter and then return a score along with track
+
+    # Step 1: Filter TrackDB for similar name as track.title
+
+    track = Track.model_validate_json(track)
+    artists_list = json.loads(artists)
+    artists = [Artist(**artist) for artist in artists_list]
+    
+    stmt = select(TrackDB).filter(TrackDB.title.ilike(f"%{track.title}%"))
+    result = await session.execute(stmt)
+    tracks_in_db = result.scalars().all()
+
+    if not tracks_in_db:
+        # No similar tracks found, return an empty list
+        return []
+
+    # Step 2: Iterate over found tracks and calculate scores
+    similar_tracks = []
+    for track_db in tracks_in_db:
+        # Fuzzy match score for track titles
+        title_score = fuzz.ratio(track.title.lower(), track_db.title.lower())
+
+        # Step 3: Find matching artist scores for each track in DB
+        # Get artists from the database for this track
+        artist_stmt = select(ArtistDB).filter(ArtistDB.id.in_(track_db.artists))
+        artist_result = await session.execute(artist_stmt)
+        db_artists = artist_result.scalars().all()
+
+        # Get the names of the artists for the track in DB
+        db_artist_names = [db_artist.name for db_artist in db_artists]
+        db_artist_names_str = " ".join(db_artist_names)
+        
+        # Get the names of the tracks from the source list of Artists
+        db_artist_names_str_src = " ".join([db_artist.name for db_artist in artists])
+        artist_score = fuzz.token_sort_ratio(
+            db_artist_names_str, 
+            db_artist_names_str_src,
+        )
+
+        version_score = fuzz.partial_token_sort_ratio(
+            track_db.version, 
+            track.version,
+        )
+
+        label_score = fuzz.ratio(track_db.label, track.label)
+
+        genre_score = fuzz.ratio(track_db.genre, track.genre)
+
+        key_score = fuzz.ratio(track_db.key, track.key)
+
+        if track_db.bpm != track.bpm:
+            bpm_score = 0
+        else:
+            bpm_score = 1
+        
+        similarity_score = (title_score + artist_score + version_score + label_score + genre_score + key_score + bpm_score)/7
+
+        # Step 5: Add the track and its score to the result
+        similar_tracks.append(
+            SimilarTrackResp(
+                **track_db.__dict__, 
+                score=similarity_score,
+        ))
+
+    return similar_tracks
 
 # PUT endpoint
 @app.put("/addTrack")
