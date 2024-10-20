@@ -1,6 +1,6 @@
 import json
 from typing import List, Optional
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, validator, field_validator
 from sqlalchemy import Column, Integer, String, ForeignKey, update, Float, ARRAY
@@ -188,7 +188,7 @@ def match_artists(artist_name: str, artist_db_names: List[str]) -> float:
     return max_score
 
 @app.get("/similarTracks", response_model=List[SimilarTrackResp])
-async def get_similar_tracks(track: str, artists:str, session: AsyncSession = Depends(get_session)):
+async def get_similar_tracks(track: str = Query(...), artists:str=Query(...), session: AsyncSession = Depends(get_session)):
 # async def get_similar_tracks(track: Track, artists: List[Artist], session: AsyncSession = Depends(get_session)):
     # Filter TrackDb for similar name as track.title
     # If no tracks are found then no similar tracks exist. Return
@@ -202,11 +202,14 @@ async def get_similar_tracks(track: str, artists:str, session: AsyncSession = De
 
     # Step 1: Filter TrackDB for similar name as track.title
 
-    track = Track.model_validate_json(track)
+    track: Track = Track.model_validate_json(track)
     artists_list = json.loads(artists)
-    artists = [Artist(**artist) for artist in artists_list]
-    
-    stmt = select(TrackDB).filter(TrackDB.title.ilike(f"%{track.title}%"))
+    artists: List[Artist] = [Artist(**artist) for artist in artists_list]
+    # stmt = select(TrackDB).filter(TrackDB.title.ilike(f"%{track.title}%"))
+    stmt = select(TrackDB).filter(
+        TrackDB.title.ilike(f"%{track.title}%"),
+        TrackDB.url != track.url  # Exclude the track with the same URL
+    )
     result = await session.execute(stmt)
     tracks_in_db = result.scalars().all()
 
@@ -252,7 +255,7 @@ async def get_similar_tracks(track: str, artists:str, session: AsyncSession = De
             bpm_score = 0
         else:
             bpm_score = 1
-        
+
         similarity_score = (title_score + artist_score + version_score + label_score + genre_score + key_score + bpm_score)/7
 
         # Step 5: Add the track and its score to the result
