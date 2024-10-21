@@ -1,17 +1,19 @@
 import json
 from typing import List, Optional
+from datetime import datetime
 from fastapi import FastAPI, HTTPException, Depends, Query
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, validator, field_validator
+from pydantic import BaseModel, field_validator
 from sqlalchemy import Column, Integer, String, ForeignKey, update, Float, ARRAY
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from sqlalchemy.future import select
-from sqlalchemy import update
+from sqlalchemy import update, DateTime
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 from rapidfuzz import fuzz
+from dateutil import parser
 
 PASSWORD = "SCRAM-SHA-256$4096:JZavfYFOt+UfXDmFS04Kyg==$XN/agqg8VV1Se4+8qbfMiDUvK5bKHFRzkhNcZ487Y90=:znDjm5z80+wrIlHJ4BLmVl0oGb+hDHeWa3g8ZBKelTw="
 DATABASE_URL = f"postgresql+asyncpg://djutils_api:{PASSWORD}@localhost/djutils"
@@ -39,8 +41,8 @@ class Track(BaseModel):
     url: str
     label: Optional[str] = None
     version: Optional[str] = None
-    released: Optional[str] = None  # Use date string format
-    length: Optional[str] = None
+    released: Optional[datetime] = None  # Use date string format
+    length: Optional[int] = None
     genre: Optional[str] = None
     key: Optional[str] = None
     bpm: Optional[float] = None
@@ -50,14 +52,61 @@ class Track(BaseModel):
 
     @field_validator('bpm', mode="before")
     def convert_bpm(cls, value):
-        if isinstance(value, str):  # Check if the value is a string
+        if value is None:
+            return None
+        elif isinstance(value, int) or isinstance(value, float):
+            return value
+        elif isinstance(value, str):  # Check if the value is a string
             try:
                 return int(value)  # Convert the string to an integer
             except ValueError:
                 raise ValueError("bpm must be a valid integer")
-        return value  # If it's already an integer, return it unchanged
+        else:
+            raise ValueError("bpm should be a valid int")
 
-    
+    @field_validator('released', mode="before")
+    def convert_to_datetime(cls, value):
+        if value is None:
+            return None
+        elif isinstance(value, datetime):
+            return value
+        elif isinstance(value, str):
+            if value == "":
+                return None
+
+            return parser.parse(value)
+        else:
+            raise ValueError("released must be a valid date format")
+
+    @field_validator('length', mode="before")
+    def convert_length(cls, value):
+        total_seconds = 0
+        try:
+            if value is None:
+                return None
+            elif isinstance(value, int):
+                return value
+            elif isinstance(value, str):
+                parts = value.split(":")
+                hours = minutes = seconds = 0
+                if len(parts) == 3:
+                    hours = int(parts[0])
+                    minutes = int(parts[1])
+                    seconds = int(parts[2])
+                elif len(parts) == 2:
+                    minutes = int(parts[0])
+                    seconds = int(parts[1])
+                elif len(parts) == 1:
+                    seconds = int(parts[0])
+
+                total_seconds = hours * 3600 + minutes * 60 + seconds
+            else:
+                raise ValueError("Did not receive valid length value")
+        except Exception as e:
+            raise Exception("length validation in track failed with exception : ", e)
+
+        return total_seconds
+
 class TrackResp(Track):
     id: int
 
@@ -84,8 +133,8 @@ class TrackDB(Base):
     url = Column(String)
     version = Column(String, index=True, nullable=True)
     label = Column(String, index=True, nullable=True)
-    released = Column(String, nullable=True)
-    length = Column(String, nullable=True)
+    released = Column(DateTime, nullable=True)
+    length = Column(Integer, nullable=True)
     genre = Column(String, index=True, nullable=True)
     key = Column(String, nullable=True)
     bpm = Column(Float, nullable=True)
@@ -254,9 +303,19 @@ async def get_similar_tracks(track: str = Query(...), artists:str=Query(...), se
         if track_db.bpm != track.bpm:
             bpm_score = 0
         else:
-            bpm_score = 1
+            bpm_score = 100
 
-        similarity_score = (title_score + artist_score + version_score + label_score + genre_score + key_score + bpm_score)/7
+        if track_db.released != track.released:
+            released_score = 0
+        else:
+            released_score = 100
+
+        if abs(track_db.length - track.length) <= 5:
+            length_score = 100
+        else:
+            length_score = 0
+
+        similarity_score = (title_score + artist_score + version_score + label_score + genre_score + key_score + bpm_score + released_score + length_score)/9
 
         # Step 5: Add the track and its score to the result
         similar_tracks.append(

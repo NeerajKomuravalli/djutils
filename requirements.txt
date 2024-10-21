@@ -4,3 +4,4 @@ sqlalchemy
 asyncpg
 greenlet
 rapidfuzz
+python-dateutil
